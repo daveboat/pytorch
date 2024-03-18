@@ -6,25 +6,16 @@ import unittest
 import torch
 from torch.testing._internal.common_device_type import (
     instantiate_device_type_tests,
-    onlyNativeDeviceTypes,
     onlyXPU,
     OpDTypes,
     ops,
-    skipMeta,
-)
-from torch.testing._internal.common_dtype import (
-    all_types_and_complex_and,
-    floating_and_complex_types_and,
-    integral_types_and,
 )
 from torch.testing._internal.common_methods_invocations import (
     ops_and_refs,
-    python_ref_db,
 )
 from torch.testing._internal.common_utils import (
     NoTest,
     run_tests,
-    slowTest,
     suppress_warnings,
     TEST_WITH_UBSAN,
     TEST_XPU,
