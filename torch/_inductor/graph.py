@@ -818,7 +818,16 @@ class GraphLowering(torch.fx.Interpreter):
                 return TensorBox.create(
                     InputBuffer(
                         name,
-                        FixedLayout(args[0].get_device(), dtype, (1,), (1,)),
+                        FixedLayout(
+                            args[0].get_device(),
+                            dtype,
+                            [
+                                1,
+                            ],
+                            [
+                                1,
+                            ],
+                        ),
                     )
                 )
 
@@ -852,8 +861,7 @@ class GraphLowering(torch.fx.Interpreter):
                 elif node.op == "output":
                     output_buffer = env[node.args[0]]
                     output_buffer.realize(dont_register=True)
-                    # breakpoint()
-                    # output_buffer.decide_layout()
+                    # breakpoint() # output_buffer.decide_layout()
                     from .kernel.sdpa import sdpa_template
 
                     layout = FixedLayout(

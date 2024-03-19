@@ -100,13 +100,7 @@ def sdpa_fake_tensor_mode(*args, **kwargs):
     return sdpa_dense(*args, **kwargs)
 
 
-sdpa.fallthrough(DispatchKey.PythonDispatcher)
-sdpa.fallthrough(DispatchKey.PythonTLSSnapshot)
+sdpa.fallthrough(DispatchKey.Python)
 sdpa.fallthrough(DispatchKey.ADInplaceOrView)
 sdpa.fallthrough(DispatchKey.BackendSelect)
-sdpa.fallthrough(DispatchKey.AutocastCPU)
-sdpa.fallthrough(DispatchKey.AutocastCPU)
-
-
-# bench(lambda: foo(q, k, v))
-# exit(0)
+sdpa.fallthrough(DispatchKey.Autocast)

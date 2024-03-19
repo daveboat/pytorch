@@ -1706,6 +1706,13 @@ class ChoiceCaller:
         return {}
 
 
+def indent_except_first(s, indents=4):
+    lines = s.splitlines(True)
+    if len(lines) > 1:
+        lines[1:] = [" " * indents + line for line in lines[1:]]
+    return "".join(lines)
+
+
 class KernelTemplate:
     """
     Base class for defining kernel templates.
@@ -1717,6 +1724,7 @@ class KernelTemplate:
     def _template_from_string(source):
         env = jinja2_env()
         if env is not None:
+            env.filters["indent_except_first"] = indent_except_first
             return env.from_string(source)
         return None
 
