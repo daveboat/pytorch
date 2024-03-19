@@ -1099,6 +1099,33 @@ if(USE_XPU)
   target_compile_definitions(torch_xpu PRIVATE USE_XPU)
 
   # ATen XPU implementation
+  set(TORCH_XPU_OPS_DIR ${TORCH_ROOT}/third_party/torch-xpu-ops)
+  set(TORCH_XPU_OPS_REPO_URL https://github.com/intel/torch-xpu-ops.git)
+  file(READ "${TORCH_ROOT}/.github/ci_commit_pins/xpu.txt" TORCH_XPU_OPS_COMMIT)
+  string(REGEX REPLACE "\n$" "" TORCH_XPU_OPS_COMMIT "${TORCH_XPU_OPS_COMMIT}")
+  if(NOT EXISTS "${TORCH_XPU_OPS_DIR}/.git")
+    execute_process(
+      COMMAND git clone --quiet ${TORCH_XPU_OPS_REPO_URL} ${TORCH_XPU_OPS_DIR}
+      RESULT_VARIABLE _exitcode)
+    if(NOT _exitcode EQUAL 0)
+      message(FATAL_ERROR "Fail to clone ${TORCH_XPU_OPS_REPO_URL}")
+    endif()
+  endif()
+  execute_process(
+    COMMAND git fetch --quiet
+    WORKING_DIRECTORY ${TORCH_XPU_OPS_DIR}
+    RESULT_VARIABLE _exitcode)
+  if(NOT _exitcode EQUAL 0)
+    message(FATAL_ERROR "Fail to fetch ${TORCH_XPU_OPS_REPO_URL}")
+  endif()
+  execute_process(
+    COMMAND git checkout --quiet ${TORCH_XPU_OPS_COMMIT}
+    WORKING_DIRECTORY ${TORCH_XPU_OPS_DIR}
+    RESULT_VARIABLE _exitcode)
+  if(NOT _exitcode EQUAL 0)
+    message(FATAL_ERROR "Fail to checkout ${TORCH_XPU_OPS_REPO_URL} to ${TORCH_XPU_OPS_COMMIT}")
+  endif()
+
   set(TORCH_XPU_OPS_INCLUDE_DIRS
       ${TORCH_SRC_DIR}/csrc/api
       ${TORCH_SRC_DIR}/csrc/api/include
@@ -1110,16 +1137,6 @@ if(USE_XPU)
   # 2. Using add_custom_command in torch-xpu-ops to define sycl device sources
   #    compilation. add_custom_command requires an explicit dependency.
   set(TORCH_XPU_OPS_PYTORCH_DEPS ATEN_CPU_FILES_GEN_TARGET)
-
-  if(NOT EXISTS "${TORCH_ROOT}/third_party/torch-xpu-ops/.git")
-    execute_process(
-      COMMAND
-      git clone -b release/2.4 https://github.com/intel/torch-xpu-ops "${TORCH_ROOT}/third_party/torch-xpu-ops")
-  else()
-    execute_process(
-      COMMAND
-      git -C "${TORCH_ROOT}/third_party/torch-xpu-ops" pull)
-  endif()
 
   add_subdirectory(${TORCH_ROOT}/third_party/torch-xpu-ops
       ${CMAKE_BINARY_DIR}/caffe2/aten_xpu)
