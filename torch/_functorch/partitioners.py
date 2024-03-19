@@ -379,31 +379,6 @@ def pointwise_ops():
 
     return ops
 
-def get_depth(node, depth_map):
-    if node in depth_map:
-        return depth_map[node]
-
-    # Base case
-    if node.op == "placeholder":
-        depth_map[node] = 0
-        return depth_map[node]
-
-    # Handle output node
-    if node.op == "output":
-        args = node.args[0]
-        for arg in args:
-            if isinstance(arg, torch.fx.node.Node):
-                get_depth(arg, depth_map)
-        return
-
-    # Get the depth of args and set the depth of this node
-    arg_depths = [get_depth(arg, depth_map) for arg in node.all_input_nodes if isinstance(arg, torch.fx.node.Node)]
-    # factory ops like full, rand might not have any input args
-    if len(arg_depths) == 0:
-        arg_depths = [0]
-    depth_map[node] = max(arg_depths) + 1
-    return depth_map[node]
-
 
 def sort_depths(args, depth_map):
     arg_depths = {arg: depth_map[arg] for arg in args if isinstance(arg, torch.fx.node.Node)}
@@ -439,11 +414,7 @@ def reordering_to_mimic_autograd_engine(gm):
     # Add new placeholder nodes in the order specified by the inputs
     for node in gm.graph.nodes:
         if node.op == "placeholder":
-            new_node = new_graph.placeholder(node.name)
-            # Can't use node_copy here as we may be turning previous call_function into placeholders
-            new_node.meta = node.meta
-            env[node] = new_node
-
+            env[node] = new_graph.node_copy(node, lambda x: env[x])
 
     order = {}
     for idx, node in enumerate(gm.graph.nodes):
@@ -452,7 +423,11 @@ def reordering_to_mimic_autograd_engine(gm):
     # Populate depth for the nodes. Depth is the distance from the inputs.
     depths = {}
     output_node = next(node for node in gm.graph.nodes if node.op == "output")
-    get_depth(output_node, depths)
+    for node in gm.graph.nodes:
+        if node.op == 'placeholder':
+            depths[node] = 0
+        else:
+            depths[node] = max([depths[arg] for arg in node.all_input_nodes if isinstance(arg, torch.fx.Node)], default=0)
 
     def insert_node_in_graph(node):
         if node in env:
@@ -474,7 +449,8 @@ def reordering_to_mimic_autograd_engine(gm):
             if order[user] < minimum_order:
                 minimum_order = order[user]
                 first_node_in_bwd = user
-    assert first_node_in_bwd is not None
+    if first_node_in_bwd is None:
+        return gm
 
     # Build the graph op-by-op by starting from the node all the way to the end
     for node in list(gm.graph.nodes)[order[first_node_in_bwd]:]:
@@ -678,7 +654,7 @@ def min_cut_rematerialization_partition(
     if config.cse:
         cse_graph = fx_graph_cse(fx_g)
         joint_module.graph = cse_graph
-    full_bw_graph = joint_module.graph
+    joint_graph = joint_module.graph
 
     graph_has_recomputable_ops = has_recomputable_ops(joint_module)
     graph_has_recomputable_rng_ops = has_recomputable_rng_ops(joint_module)
@@ -718,6 +694,19 @@ def min_cut_rematerialization_partition(
     if len(required_bw_nodes) == 0:
         return default_partition(joint_module, _joint_inputs, num_fwd_outputs=num_fwd_outputs)
 
+    def is_fusible(a, b):
+        # We can perform "memory fusion" into a cat, but cat cannot be a
+        # producer to a fusion
+        if get_aten_target(b) == aten.cat:
+            return True
+        return get_aten_target(a) in fusible_ops and get_aten_target(b) in fusible_ops
+
+    fw_order = 0
+    for node in joint_module.graph.nodes:
+        if node in required_fw_nodes:
+            node.fw_order = fw_order
+            fw_order += 1
+
     for node in reversed(joint_module.graph.nodes):
         if node not in required_fw_nodes:
             node.dist_from_bw = 0
@@ -733,10 +722,10 @@ def min_cut_rematerialization_partition(
     default_recomputable_ops = [aten.add, aten.sub, aten.div, aten.atan2, aten.mul, aten.max, aten.min, aten.pow, aten.remainder, aten.fmod, aten.__and__, aten.__or__, aten.__xor__, aten.__lshift__, aten.__rshift__, aten.eq, aten.ne, aten.ge, aten.gt, aten.le, aten.lt, aten.abs, aten.bitwise_not, aten.ceil, aten.floor, aten.frac, aten.neg, aten.relu, aten.round, aten.silu, aten.trunc, aten.log, aten.log10, aten.log1p, aten.log2, aten.lgamma, aten.exp, aten.expm1, aten.erf, aten.erfc, aten.cos, aten.acos, aten.cosh, aten.sin, aten.asin, aten.sinh, aten.tan, aten.atan, aten.tanh, aten.atanh, aten.sqrt, aten.rsqrt, aten.reciprocal, aten.sigmoid, aten.softplus, aten.threshold, aten.threshold_backward, aten.clamp, aten.where, aten.lerp, aten.addcmul, aten.gelu, aten.gelu_backward, aten.sum, aten.mean, aten._grad_sum_to_size, aten.sum_to_size, aten.amax, aten.to, aten.type_as, operator.getitem, aten.squeeze, aten.unsqueeze, aten.rsub, aten._to_copy]  # noqa: E501,B950
     view_ops = [aten.squeeze, aten.unsqueeze, aten.alias]
     if compiler == "inductor":
-        default_recomputable_ops += [prims.div, prims.convert_element_type, aten.clone, aten._to_copy, aten.full_like, prims.var, prims.sum, aten.var, aten.std, prims.broadcast_in_dim, aten.select, aten.permute, aten._unsafe_view, aten.view, aten.expand, aten.slice, aten.reshape, aten.broadcast_tensors, aten.scalar_tensor, aten.ones, aten.new_zeros, aten.lift_fresh_copy, aten.arange, aten.triu, aten.var_mean, aten.isinf, aten.any, aten.full, aten.as_strided, aten.zeros, aten.argmax, aten.maximum]  # noqa: E501,B950
-        view_ops += [aten.view, aten.slice, aten.permute, aten.t, prims.broadcast_in_dim, aten.expand, aten.as_strided]
+        default_recomputable_ops += [prims.div, prims.convert_element_type, aten.clone, aten._to_copy, aten.full_like, prims.var, prims.sum, aten.var, aten.std, prims.broadcast_in_dim, aten.select, aten._unsafe_view, aten.view, aten.expand, aten.slice, aten.reshape, aten.broadcast_tensors, aten.scalar_tensor, aten.ones, aten.new_zeros, aten.lift_fresh_copy, aten.arange, aten.triu, aten.var_mean, aten.isinf, aten.any, aten.full, aten.as_strided, aten.zeros, aten.argmax, aten.maximum, prims.iota]  # noqa: E501,B950
+        view_ops += [aten.view, aten.slice, aten.t, prims.broadcast_in_dim, aten.expand, aten.as_strided, aten.permute]
         # Natalia said that we should allow recomputing indexing :)
-        default_recomputable_ops += [aten.index]
+        default_recomputable_ops += [aten.index, aten.gather]
     default_recomputable_ops += view_ops
 
     default_recomputable_ops += pointwise_ops()
@@ -749,11 +738,10 @@ def min_cut_rematerialization_partition(
         method_to_operator(m)
         for m in magic_methods
     ]
-
     recomputable_ops = set(recomputable_ops) if recomputable_ops is not None else set(default_recomputable_ops)
 
     random_ops = [aten.native_dropout, aten.rand_like, aten.randn_like]
-    compute_intensive_ops = [aten.mm, aten.convolution, aten.convolution_backward, aten.bmm, aten.addmm, aten.upsample_bilinear2d, aten._softmax, aten._softmax_backward_data, aten.native_layer_norm, aten.native_layer_norm_backward, aten.native_batch_norm, aten.native_batch_norm_backward, aten._native_batch_norm_legit]  # noqa: E501,B950
+    compute_intensive_ops = [aten.mm, aten.convolution, aten.convolution_backward, aten.bmm, aten.addmm, aten._scaled_dot_product_flash_attention, aten.upsample_bilinear2d] # noqa: E501,B950
 
     fusible_ops = recomputable_ops | set(random_ops)
     if AOT_PARTITIONER_DEBUG:
@@ -767,13 +755,15 @@ def min_cut_rematerialization_partition(
         print()
 
     def is_materialized_backwards(node):
+        if get_aten_target(node) in view_ops:
+            return False
         cur_nodes = {node}
         while len(cur_nodes) > 0:
             cur = cur_nodes.pop()
             for user in cur.users:
                 if user not in required_fw_nodes and not is_fusible(cur, user):
                     return True
-                if user not in required_fw_nodes and get_aten_target(user) in view_ops:
+                if get_aten_target(user) in view_ops:
                     cur_nodes.add(user)
 
         return False
@@ -783,11 +773,17 @@ def min_cut_rematerialization_partition(
             return node.meta["recompute"] == 0
         elif config.aggressive_recomputation:
             ignored_ops = random_ops + compute_intensive_ops
+            # if get_aten_target(node) in ignored_ops:
+            #     is_banned = str(node) in {"addmm", "addmm_1", "addmm_2"}
+            #     if is_banned:
+            #         print(node, node.target, node.meta['val'])
+            #     return is_banned
             return (node.op == 'call_function' and get_aten_target(node) in ignored_ops)
         else:
             if node.op != 'call_function':
                 return False
             if get_aten_target(node) not in recomputable_ops:
+                # print(get_aten_target(node))
                 return True
             if node.target == operator.getitem:
                 return False
@@ -800,6 +796,7 @@ def min_cut_rematerialization_partition(
             # backwards pass is "free". However, if a node must be materialized
             # in the backwards pass, then recomputing it is never free.
             if is_materialized_backwards(node):
+                print("materialized backwards", node, tuple(node.users))
                 return True
 
             # Arbitrary hack that sometimes seems to help things. The above
@@ -818,12 +815,6 @@ def min_cut_rematerialization_partition(
             output_size = _size_of(node)
             return (output_size * 4 < input_tensors_size)
 
-    def is_fusible(a, b):
-        # We can perform "memory fusion" into a cat, but cat cannot be a
-        # producer to a fusion
-        if get_aten_target(b) == aten.cat:
-            return True
-        return get_aten_target(a) in fusible_ops and get_aten_target(b) in fusible_ops
 
     def is_materialized(node):
         if node.op == 'placeholder':
@@ -837,15 +828,13 @@ def min_cut_rematerialization_partition(
         # Heuristic to bias towards nodes closer to the backwards pass
         # Complete guess about current value
         mem_sz = int(mem_sz * (1.1 ** max(min(node.dist_from_bw, 100), 1)))
-        # mem_sz = int(mem_sz + node.dist_from_bw)
-
         if is_materialized(node):
             return mem_sz
         else:
             return mem_sz * 2
 
     nx_graph = nx.DiGraph()
-    for node in full_bw_graph.nodes:
+    for node in joint_graph.nodes:
         if node.op == 'output':
             continue
 
@@ -869,7 +858,7 @@ def min_cut_rematerialization_partition(
         # If a node can't be recomputed (too expensive or involves randomness),
         # we prevent it from being recomputed by adding an inf edge to the source
         # We only need to ban nodes in the fw pass, as those are the only ones that would be recomputed.
-        if ban_recomputation(node) and node in required_fw_nodes:
+        if node in required_fw_nodes and ban_recomputation(node):
             nx_graph.add_edge("source", node.name + "_in", capacity=math.inf)
 
         # Checks if a node is actually a tuple. Can be simplified to just an isinstance check if we always use faketensors.
@@ -888,6 +877,55 @@ def min_cut_rematerialization_partition(
         for user in node.users:
             nx_graph.add_edge(node.name + "_out", user.name + "_in", capacity=math.inf)
 
+    visited = set()
+    for start_node in joint_graph.nodes:
+        if start_node not in required_fw_nodes:
+            continue
+        import heapq
+        fusible = [(start_node.fw_order, start_node)]
+        start_pos = start_node.fw_order
+        start_order = start_node.fw_order
+        while len(fusible) > 0:
+            _, cur = heapq.heappop(fusible)
+            if cur in visited:
+                continue
+            visited.add(cur)
+            if cur.fw_order > start_order + 50 and len(fusible) == 0:
+                print("force materializing ", cur, start_node, cur.fw_order, start_node.fw_order)
+                nx_graph.add_edge("source", cur.name + "_in", capacity=math.inf)
+                break
+
+            for user in cur.users:
+                if user in required_fw_nodes and is_fusible(cur, user):
+                    heapq.heappush(fusible, (user.fw_order, user))
+
+    def find_first_unfusible(start_nodes, max_range):
+        sorted_nodes = []
+        for n in start_nodes:
+            heapq.heappush(sorted_nodes, (n.fw_order, n, True))
+
+        while len(sorted_nodes) > 0:
+            _, node, node_is_fusible = heapq.heappop(sorted_nodes)
+            if not node_is_fusible:
+                return node.fw_order
+            if node.fw_order > max_range:
+                continue
+            for user in node.users:
+                if user in required_fw_nodes:
+                    heapq.heappush(sorted_nodes, (user.fw_order, user, is_fusible(node, user)))
+        return max_range
+
+    for used_node in joint_graph.nodes:
+        if used_node not in required_fw_nodes:
+            continue
+        orders = [user.fw_order for user in used_node.users if user in required_fw_nodes]
+        fw_users = [user for user in used_node.users if user in required_fw_nodes]
+        if len(orders) > 0:
+            first_unfusible_use = find_first_unfusible(fw_users, max(orders))
+            for user in tuple(used_node.users):
+                if user in required_fw_nodes and user.fw_order > first_unfusible_use:
+                    # print(f"forcing {used_node} -> {user} {user.fw_order}")
+                    nx_graph.add_edge("source", user.name+"_in", capacity=math.inf)
     try:
         cut_value, partition = nx.minimum_cut(nx_graph, "source", "sink")
     except Exception:
@@ -921,10 +959,14 @@ def min_cut_rematerialization_partition(
             fw_module, bw_module = functionalize_rng_ops(
                 joint_module, fw_module, bw_module, len(saved_sym_nodes)
             )
-        bw_module = reordering_to_mimic_autograd_engine(bw_module)
+    bw_module = reordering_to_mimic_autograd_engine(bw_module)
 
     if AOT_PARTITIONER_DEBUG:
+        from torch._inductor.fx_utils import get_node_storage
+        storages = set(get_node_storage(node) for node in saved_values)
         print("Theoretical Activations Stored: ", sum([_size_of(i) for i in saved_values]) / 1e9)
+        sorted_sizes = sorted([(_size_of(i), str(i)) for i in saved_values])
+        # for i in sorted_sizes: print(i)
         fw_module_nodes = {node.name for node in fw_module.graph.nodes if node.op == 'call_function'}
         bw_module_nodes = {node.name for node in bw_module.graph.nodes if node.op == 'call_function'}
         remat_nodes = fw_module_nodes & bw_module_nodes
